@@ -156,4 +156,32 @@ CMakeFiles/taskmanager_test.dir/source/main_taskmanager.cu.o : /home/fs72329/nty
     /usr/include/c++/11/type_traits \
     /usr/include/c++/11/initializer_list \
     /usr/include/c++/11/cstdio \
-    /home/fs72329/ntylek/master-project-repo/broker-queue/include/queues/taskmanager_gpu.cuh
+    /usr/include/c++/11/vector \
+    /usr/include/c++/11/bits/stl_algobase.h \
+    /usr/include/c++/11/bits/functexcept.h \
+    /usr/include/c++/11/bits/exception_defines.h \
+    /usr/include/c++/11/ext/numeric_traits.h \
+    /usr/include/c++/11/bits/stl_iterator_base_types.h \
+    /usr/include/c++/11/bits/stl_iterator_base_funcs.h \
+    /usr/include/c++/11/bits/concept_check.h \
+    /usr/include/c++/11/debug/assertions.h \
+    /usr/include/c++/11/bits/stl_iterator.h \
+    /usr/include/c++/11/bits/ptr_traits.h \
+    /usr/include/c++/11/debug/debug.h \
+    /usr/include/c++/11/bits/predefined_ops.h \
+    /usr/include/c++/11/bits/allocator.h \
+    /usr/include/x86_64-linux-gnu/c++/11/bits/c++allocator.h \
+    /usr/include/c++/11/ext/new_allocator.h \
+    /usr/include/c++/11/bits/memoryfwd.h \
+    /usr/include/c++/11/bits/stl_construct.h \
+    /usr/include/c++/11/bits/stl_uninitialized.h \
+    /usr/include/c++/11/ext/alloc_traits.h \
+    /usr/include/c++/11/bits/alloc_traits.h \
+    /usr/include/c++/11/bits/stl_vector.h \
+    /usr/include/c++/11/bits/stl_bvector.h \
+    /usr/include/c++/11/bits/functional_hash.h \
+    /usr/include/c++/11/bits/hash_bytes.h \
+    /usr/include/c++/11/bits/range_access.h \
+    /usr/include/c++/11/bits/vector.tcc \
+    /home/fs72329/ntylek/master-project-repo/broker-queue/include/queues/taskmanager_gpu.cuh \
+    /home/fs72329/ntylek/master-project-repo/broker-queue/include/queues/broker.cuh

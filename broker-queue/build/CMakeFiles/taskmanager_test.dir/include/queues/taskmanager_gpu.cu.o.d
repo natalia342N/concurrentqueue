@@ -156,4 +156,5 @@ CMakeFiles/taskmanager_test.dir/include/queues/taskmanager_gpu.cu.o : /home/fs72
     /usr/include/c++/11/type_traits \
     /usr/include/c++/11/initializer_list \
     /usr/include/c++/11/cstdio \
-    /home/fs72329/ntylek/master-project-repo/broker-queue/include/queues/taskmanager_gpu.cuh
+    /home/fs72329/ntylek/master-project-repo/broker-queue/include/queues/taskmanager_gpu.cuh \
+    /home/fs72329/ntylek/master-project-repo/broker-queue/include/queues/broker.cuh

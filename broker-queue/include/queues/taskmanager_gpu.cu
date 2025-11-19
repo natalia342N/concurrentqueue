@@ -6,74 +6,176 @@
 
 namespace ASC_HPC {
 
-  // --- small helper for error checking ---
+  // --------------------------------
+  // host-side worker stream
+  // --------------------------------
+  static cudaStream_t g_worker_stream = nullptr;
+
+  // --------------------------------
+  // small helper for error checking
+  // --------------------------------
   inline void checkCuda(cudaError_t err, const char* what) {
     if (err != cudaSuccess) {
       printf("CUDA ERROR in %s: %s (%d)\n",
              what, cudaGetErrorString(err), (int)err);
       fflush(stdout);
-      // hard abort so we see it clearly
       std::abort();
     }
   }
 
-  // Single global device counter
-  __device__ int d_doneCounter = 0;
+  // --------------------------------
+  // device-side globals
+  // --------------------------------
 
-  // Very simple test kernel: runs on GPU, bumps the counter 16 times
-  __global__ void test_kernel(int n) {
-    if (blockIdx.x == 0 && threadIdx.x == 0) {
-      for (int i = 0; i < n; ++i) {
-        printf("test_kernel: i=%d\n", i);
-        atomicAdd(&d_doneCounter, 1);
-      }
+  __device__ BrokerQueue<1024, GPU_Task, 10000> globalQueue;
+  __device__ int d_totalTasks   = 0;  // how many tasks must be processed
+  __device__ int d_doneCounter  = 0;  // how many tasks have been completed
+
+  // --------------------------------
+  // queue init kernel
+  // --------------------------------
+
+  __global__ void init_queue_kernel() {
+    globalQueue.init();
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+      printf("init_queue_kernel: queue initialized\n");
     }
   }
 
-  // ------- Host API: no queues, no jobs, just this counter test -------
+  // --------------------------------
+  // enqueue kernel (runs briefly)
+  // --------------------------------
 
-  void StartWorkersGPU(int /*blocks*/, int /*threadsPerBlock*/) {
-    // reset counter on device
-    int zero = 0;
-    checkCuda(cudaMemcpyToSymbol(d_doneCounter, &zero, sizeof(int)),
-              "cudaMemcpyToSymbol(d_doneCounter)");
-
-    // launch test kernel once
-    test_kernel<<<1, 1>>>(16);
-
-    // check launch error immediately
-    checkCuda(cudaGetLastError(), "kernel launch (test_kernel)");
-
-    // (don't sync here; WaitForAllGPU will hit it via memcpy)
+  __global__ void enqueue_kernel(GPU_Task task) {
+    bool ok = globalQueue.enqueue(task);
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+      printf("enqueue_kernel: ok=%d, type=%d, n=%d\n",
+             (int)ok, task.type, task.n);
+    }
   }
 
-  void WaitForAllGPU(int expectedDone) {
-    int done  = 0;
-    int iter  = 0;
-    int const maxIters = 200000;
+  // --------------------------------
+  // worker kernel (persistent-ish)
+  //
+  // runs in its own stream while enqueue kernels
+  // are launched in the default stream.
+  // --------------------------------
 
-    while (done < expectedDone && iter < maxIters) {
-      checkCuda(cudaMemcpyFromSymbol(&done, d_doneCounter, sizeof(int)),
-                "cudaMemcpyFromSymbol(d_doneCounter)");
+  __global__ void worker_kernel() {
+    int iter = 0;
+    const int maxIters = 1000000;   // safety cap so we never hard-hang
 
-      if (iter % 1000 == 0) {
-        printf("WaitForAllGPU: iter=%d done=%d / %d\n",
-               iter, done, expectedDone);
-        fflush(stdout);
+    while (iter < maxIters) {
+
+      int total = d_totalTasks;
+      int done  = d_doneCounter;
+
+      // all tasks processed?
+      if (done >= total && total > 0) {
+        if (threadIdx.x == 0 && blockIdx.x == 0) {
+          printf("worker_kernel: all tasks done (done=%d, total=%d)\n",
+                 done, total);
+        }
+        break;
       }
+
+      bool     hasTask = false;
+      GPU_Task task;
+
+      globalQueue.dequeue(hasTask, task);
+
+      if (hasTask) {
+        if (threadIdx.x == 0 && blockIdx.x == 0) {
+          printf("worker_kernel: GOT task type=%d n=%d\n",
+                 task.type, task.n);
+        }
+
+        // execute task cooperatively: type 0 = y = alpha * x
+        if (task.type == 0) {
+          for (int i = threadIdx.x; i < task.n; i += blockDim.x) {
+            task.y[i] = task.alpha * task.x[i];
+          }
+        }
+
+        __syncthreads();
+        if (threadIdx.x == 0) {
+          atomicAdd(&d_doneCounter, 1);
+        }
+      } else {
+        // no work *right now*; back off a bit
+        if (threadIdx.x == 0 && blockIdx.x == 0 && (iter % 200000) == 0) {
+          printf("worker_kernel: no task at iter=%d (total=%d, done=%d)\n",
+                 iter, total, done);
+        }
+        __nanosleep(50);
+      }
+
       ++iter;
     }
 
-    if (done < expectedDone) {
-      printf("WaitForAllGPU: TIMEOUT, done=%d / %d\n", done, expectedDone);
-    } else {
-      printf("WaitForAllGPU: completed, done=%d\n", done);
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+      printf("worker_kernel: EXIT, final iter=%d, total=%d, done=%d\n",
+             iter, d_totalTasks, d_doneCounter);
     }
   }
 
+  // --------------------------------
+  // Host API
+  // --------------------------------
+
+  void StartWorkersGPU(int blocks, int threadsPerBlock, int expectedTasks) {
+    printf("Host: StartWorkersGPU - expectedTasks=%d\n", expectedTasks);
+
+    int zero = 0;
+    checkCuda(cudaMemcpyToSymbol(d_doneCounter, &zero, sizeof(int)),
+              "cudaMemcpyToSymbol(d_doneCounter)");
+    checkCuda(cudaMemcpyToSymbol(d_totalTasks,  &expectedTasks, sizeof(int)),
+              "cudaMemcpyToSymbol(d_totalTasks)");
+
+    // create worker stream if needed
+    if (!g_worker_stream) {
+      checkCuda(cudaStreamCreate(&g_worker_stream),
+                "cudaStreamCreate(g_worker_stream)");
+    }
+
+    // initialize queue in worker stream
+    init_queue_kernel<<<1, 1, 0, g_worker_stream>>>();
+    checkCuda(cudaGetLastError(), "kernel launch (init_queue_kernel)");
+
+    // make sure init is done before workers start dequeuing
+    checkCuda(cudaStreamSynchronize(g_worker_stream),
+              "cudaStreamSynchronize (after init)");
+
+    // launch worker kernel in worker stream (persists until all tasks done)
+    worker_kernel<<<blocks, threadsPerBlock, 0, g_worker_stream>>>();
+    checkCuda(cudaGetLastError(), "kernel launch (worker_kernel)");
+  }
+
+  void EnqueueGPUTask(const GPU_Task& t) {
+    printf("Host: EnqueueGPUTask - launching enqueue_kernel\n");
+    // launch in default stream so it can overlap with worker stream
+    enqueue_kernel<<<1, 1>>>(t);
+    checkCuda(cudaGetLastError(), "kernel launch (enqueue_kernel)");
+
+    // for now we sync here to keep behaviour simple & deterministic
+    checkCuda(cudaDeviceSynchronize(), "cudaDeviceSynchronize (after enqueue)");
+  }
+
+  void WaitForAllGPU() {
+    printf("Host: WaitForAllGPU - synchronizing worker stream\n");
+    if (g_worker_stream) {
+      checkCuda(cudaStreamSynchronize(g_worker_stream),
+                "cudaStreamSynchronize(g_worker_stream)");
+    }
+    printf("Host: WaitForAllGPU - worker finished\n");
+  }
+
   void StopWorkersGPU() {
-    // just make sure any kernel is finished
-    checkCuda(cudaDeviceSynchronize(), "cudaDeviceSynchronize()");
+    printf("Host: StopWorkersGPU\n");
+    if (g_worker_stream) {
+      cudaStreamDestroy(g_worker_stream);
+      g_worker_stream = nullptr;
+    }
   }
 
 } // namespace ASC_HPC
