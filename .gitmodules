@@ -1,0 +1,3 @@
+[submodule "ASC-HPC"]
+	path = ASC-HPC
+	url = https://github.com/natalia342N/ASC-HPC.git
