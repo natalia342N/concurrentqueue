@@ -9,27 +9,16 @@ namespace ASC_HPC {
 // -------------------------------
 
 struct GPU_Task {
-    int   type;
-    int   n;
-    double *x;
-    double *y;
-    double alpha;
+    int   type;    // 0 = y = alpha * x
+    int   n;       // length of vectors
+    double *x;     // device pointer
+    double *y;     // device pointer
+    double alpha;  // scalar
 };
 
-// -------------------------------
-// Public API (host)
-// -------------------------------
-
-// expectedTasks: how many tasks will be enqueued in total
-void StartWorkersGPU(int blocks, int threadsPerBlock, int expectedTasks);
-
-// wait until all tasks are processed by the workers
-void WaitForAllGPU();
-
-// clean up worker stream (and in future: force-stop workers)
-void StopWorkersGPU();
-
-// enqueue a GPU task into the BrokerQueue on the device
-void EnqueueGPUTask(const GPU_Task& t);
+// Launches the single-kernel scheduler on the GPU.
+// h_tasks: array of GPU_Task structs on the host
+// numTasks: number of tasks
+void RunSchedulerSingleKernel(GPU_Task* h_tasks, int numTasks);
 
 } // namespace ASC_HPC

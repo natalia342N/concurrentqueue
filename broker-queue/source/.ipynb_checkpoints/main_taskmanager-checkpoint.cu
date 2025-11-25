@@ -8,49 +8,43 @@ int main() {
 
   const int N = 1024;
 
+  // Allocate device vectors
   double *dx = nullptr;
   double *dy = nullptr;
   cudaMalloc(&dx, N * sizeof(double));
   cudaMalloc(&dy, N * sizeof(double));
   printf("Host: allocated device memory\n");
 
+  // Initialize x on host and copy to device
   std::vector<double> hx(N, 1.0);
   cudaMemcpy(dx, hx.data(), N * sizeof(double), cudaMemcpyHostToDevice);
   printf("Host: copied input to device\n");
 
-  printf("Host: calling StartWorkersGPU (expectedTasks=1)\n");
-  ASC_HPC::StartWorkersGPU(1, 128, 1);
-  printf("Host: returned from StartWorkersGPU\n");
-
+  // Prepare a single GPU_Task
   ASC_HPC::GPU_Task task;
-  task.type  = 0;
+  task.type  = 0;      // y = alpha * x
   task.n     = N;
   task.alpha = 2.0;
-  task.x     = dx;
-  task.y     = dy;
+  task.x     = dx;     // device pointer
+  task.y     = dy;     // device pointer
 
-  printf("Host: calling EnqueueGPUTask\n");
-  ASC_HPC::EnqueueGPUTask(task);
-  printf("Host: returned from EnqueueGPUTask\n");
+  // Launch the single-kernel scheduler with 1 task
+  ASC_HPC::GPU_Task tasks[1] = { task };
+  printf("Host: calling RunSchedulerSingleKernel\n");
+  ASC_HPC::RunSchedulerSingleKernel(tasks, 1);
+  printf("Host: returned from RunSchedulerSingleKernel\n");
 
-  printf("Host: calling WaitForAllGPU\n");
-  ASC_HPC::WaitForAllGPU();
-  printf("Host: returned from WaitForAllGPU\n");
-
-  printf("Host: calling StopWorkersGPU\n");
-  ASC_HPC::StopWorkersGPU();
-  printf("Host: returned from StopWorkersGPU\n");
-
+  // Copy result back and check
   std::vector<double> hy(N);
   cudaMemcpy(hy.data(), dy, N * sizeof(double), cudaMemcpyDeviceToHost);
 
   printf("Result check:\n");
-  printf("  hy[0] = %f\n", hy[0]);
+  printf("  hy[0]   = %f\n", hy[0]);
   printf("  hy[N-1] = %f\n", hy[N-1]);
 
   cudaFree(dx);
   cudaFree(dy);
 
-  printf("Host: finished GPU queue test.\n");
+  printf("Host: finished GPU BrokerQueue single-kernel test.\n");
   return 0;
 }

@@ -7,11 +7,6 @@
 namespace ASC_HPC {
 
   // --------------------------------
-  // host-side worker stream
-  // --------------------------------
-  static cudaStream_t g_worker_stream = nullptr;
-
-  // --------------------------------
   // small helper for error checking
   // --------------------------------
   inline void checkCuda(cudaError_t err, const char* what) {
@@ -27,54 +22,45 @@ namespace ASC_HPC {
   // device-side globals
   // --------------------------------
 
-  __device__ BrokerQueue<1024, GPU_Task, 10000> globalQueue;
-  __device__ int d_totalTasks   = 0;  // how many tasks must be processed
-  __device__ int d_doneCounter  = 0;  // how many tasks have been completed
+  __device__ BrokerQueue<1024, GPU_Task, 100000> globalQueue;
+  __device__ int d_doneCounter = 0;  // how many tasks have been completed
 
   // --------------------------------
-  // queue init kernel
-  // --------------------------------
-
-  __global__ void init_queue_kernel() {
-    globalQueue.init();
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
-      printf("init_queue_kernel: queue initialized\n");
-    }
-  }
-
-  // --------------------------------
-  // enqueue kernel (runs briefly)
-  // --------------------------------
-
-  __global__ void enqueue_kernel(GPU_Task task) {
-    bool ok = globalQueue.enqueue(task);
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
-      printf("enqueue_kernel: ok=%d, type=%d, n=%d\n",
-             (int)ok, task.type, task.n);
-    }
-  }
-
-  // --------------------------------
-  // worker kernel (persistent-ish)
+  // Single-kernel scheduler
   //
-  // runs in its own stream while enqueue kernels
-  // are launched in the default stream.
+  // 1) Initializes the queue
+  // 2) Enqueues all tasks (by thread 0)
+  // 3) All threads cooperatively dequeue + execute tasks
   // --------------------------------
 
-  __global__ void worker_kernel() {
+  __global__ void scheduler_kernel(GPU_Task* tasks, int numTasks) {
+    // 1) init queue + doneCounter
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+      globalQueue.init();
+      d_doneCounter = 0;
+      printf("scheduler_kernel: queue initialized, numTasks=%d\n", numTasks);
+    }
+    __syncthreads();
+
+    // 2) producer phase: single producer enqueues all tasks
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+      for (int i = 0; i < numTasks; ++i) {
+        bool ok = globalQueue.enqueue(tasks[i]);
+        printf("scheduler_kernel: enqueue task %d, ok=%d, type=%d, n=%d\n",
+               i, (int)ok, tasks[i].type, tasks[i].n);
+      }
+    }
+    __syncthreads();
+
+    // 3) worker phase: all threads repeatedly dequeue + execute
+    const int maxIters = 1000000;
     int iter = 0;
-    const int maxIters = 1000000;   // safety cap so we never hard-hang
 
     while (iter < maxIters) {
-
-      int total = d_totalTasks;
-      int done  = d_doneCounter;
-
-      // all tasks processed?
-      if (done >= total && total > 0) {
+      int done = d_doneCounter;
+      if (done >= numTasks) {
         if (threadIdx.x == 0 && blockIdx.x == 0) {
-          printf("worker_kernel: all tasks done (done=%d, total=%d)\n",
-                 done, total);
+          printf("scheduler_kernel: all tasks done (done=%d)\n", done);
         }
         break;
       }
@@ -86,11 +72,11 @@ namespace ASC_HPC {
 
       if (hasTask) {
         if (threadIdx.x == 0 && blockIdx.x == 0) {
-          printf("worker_kernel: GOT task type=%d n=%d\n",
+          printf("scheduler_kernel: GOT task, type=%d, n=%d\n",
                  task.type, task.n);
         }
 
-        // execute task cooperatively: type 0 = y = alpha * x
+        // execute task type 0: y[i] = alpha * x[i]
         if (task.type == 0) {
           for (int i = threadIdx.x; i < task.n; i += blockDim.x) {
             task.y[i] = task.alpha * task.x[i];
@@ -102,80 +88,48 @@ namespace ASC_HPC {
           atomicAdd(&d_doneCounter, 1);
         }
       } else {
-        // no work *right now*; back off a bit
+        // no work right now, back off a bit
         if (threadIdx.x == 0 && blockIdx.x == 0 && (iter % 200000) == 0) {
-          printf("worker_kernel: no task at iter=%d (total=%d, done=%d)\n",
-                 iter, total, done);
+          printf("scheduler_kernel: no task at iter=%d, done=%d\n",
+                 iter, d_doneCounter);
         }
         __nanosleep(50);
       }
 
       ++iter;
+      __syncthreads();
     }
 
     if (threadIdx.x == 0 && blockIdx.x == 0) {
-      printf("worker_kernel: EXIT, final iter=%d, total=%d, done=%d\n",
-             iter, d_totalTasks, d_doneCounter);
+      printf("scheduler_kernel: EXIT, final iter=%d, done=%d\n",
+             iter, d_doneCounter);
     }
   }
 
   // --------------------------------
-  // Host API
+  // Host wrapper
   // --------------------------------
 
-  void StartWorkersGPU(int blocks, int threadsPerBlock, int expectedTasks) {
-    printf("Host: StartWorkersGPU - expectedTasks=%d\n", expectedTasks);
+  void RunSchedulerSingleKernel(GPU_Task* h_tasks, int numTasks) {
+    printf("Host: RunSchedulerSingleKernel - numTasks=%d\n", numTasks);
 
-    int zero = 0;
-    checkCuda(cudaMemcpyToSymbol(d_doneCounter, &zero, sizeof(int)),
-              "cudaMemcpyToSymbol(d_doneCounter)");
-    checkCuda(cudaMemcpyToSymbol(d_totalTasks,  &expectedTasks, sizeof(int)),
-              "cudaMemcpyToSymbol(d_totalTasks)");
+    // copy tasks to device (note: x,y pointers inside must already be device pointers)
+    GPU_Task* d_tasks = nullptr;
+    checkCuda(cudaMalloc(&d_tasks, numTasks * sizeof(GPU_Task)),
+              "cudaMalloc(d_tasks)");
+    checkCuda(cudaMemcpy(d_tasks, h_tasks, numTasks * sizeof(GPU_Task),
+                         cudaMemcpyHostToDevice),
+              "cudaMemcpy(d_tasks)");
 
-    // create worker stream if needed
-    if (!g_worker_stream) {
-      checkCuda(cudaStreamCreate(&g_worker_stream),
-                "cudaStreamCreate(g_worker_stream)");
-    }
+    // launch scheduler kernel: 1 block, 128 threads for now
+    dim3 blocks(1);
+    dim3 threads(128);
+    scheduler_kernel<<<blocks, threads>>>(d_tasks, numTasks);
+    checkCuda(cudaGetLastError(), "kernel launch (scheduler_kernel)");
 
-    // initialize queue in worker stream
-    init_queue_kernel<<<1, 1, 0, g_worker_stream>>>();
-    checkCuda(cudaGetLastError(), "kernel launch (init_queue_kernel)");
+    checkCuda(cudaDeviceSynchronize(), "cudaDeviceSynchronize (scheduler_kernel)");
 
-    // make sure init is done before workers start dequeuing
-    checkCuda(cudaStreamSynchronize(g_worker_stream),
-              "cudaStreamSynchronize (after init)");
-
-    // launch worker kernel in worker stream (persists until all tasks done)
-    worker_kernel<<<blocks, threadsPerBlock, 0, g_worker_stream>>>();
-    checkCuda(cudaGetLastError(), "kernel launch (worker_kernel)");
-  }
-
-  void EnqueueGPUTask(const GPU_Task& t) {
-    printf("Host: EnqueueGPUTask - launching enqueue_kernel\n");
-    // launch in default stream so it can overlap with worker stream
-    enqueue_kernel<<<1, 1>>>(t);
-    checkCuda(cudaGetLastError(), "kernel launch (enqueue_kernel)");
-
-    // for now we sync here to keep behaviour simple & deterministic
-    checkCuda(cudaDeviceSynchronize(), "cudaDeviceSynchronize (after enqueue)");
-  }
-
-  void WaitForAllGPU() {
-    printf("Host: WaitForAllGPU - synchronizing worker stream\n");
-    if (g_worker_stream) {
-      checkCuda(cudaStreamSynchronize(g_worker_stream),
-                "cudaStreamSynchronize(g_worker_stream)");
-    }
-    printf("Host: WaitForAllGPU - worker finished\n");
-  }
-
-  void StopWorkersGPU() {
-    printf("Host: StopWorkersGPU\n");
-    if (g_worker_stream) {
-      cudaStreamDestroy(g_worker_stream);
-      g_worker_stream = nullptr;
-    }
+    cudaFree(d_tasks);
   }
 
 } // namespace ASC_HPC
